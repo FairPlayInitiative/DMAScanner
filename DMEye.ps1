@@ -11,7 +11,11 @@ param(
     [string]$ExportPath = "$PSScriptRoot\DMA_Scan_Results_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
 )
 
-Write-Host "`n===== DMA DETECTION SCRIPT =====" -ForegroundColor Cyan
+Write-Host "`n==================================================" -ForegroundColor Cyan
+Write-Host " DMEye {Pretournament System Checker} v1.1.0" -ForegroundColor Yellow
+Write-Host " (c) 2018 EreVeX / DMEye System Checker" -ForegroundColor Gray
+Write-Host "==================================================`n" -ForegroundColor Cyan
+Write-Host "===== DMA DETECTION SCRIPT =====" -ForegroundColor Cyan
 
 #region Configuration Variables
 
@@ -31,10 +35,10 @@ try {
 try {
     $webhookUrl = Read-Host "Enter Discord webhook URL (or press Enter to skip)"
     if ($webhookUrl) {
-        # Enhanced input validation
+        # Enhanced input validation - accepts discord.com, discordapp.com, and discordapi.com
         $webhookUrl = $webhookUrl.Trim()
-        if ($webhookUrl -notmatch "^https://(discord\.com|discordapp\.com)/api/webhooks/[\w/]+$") {
-            Write-Host "Invalid webhook URL format. Expected: https://discord.com/api/webhooks/..." -ForegroundColor Yellow
+        if ($webhookUrl -notmatch "^https://(discord\.com|discordapp\.com|discordapi\.com)/api/webhooks/[\w/-]+$") {
+            Write-Host "Invalid webhook URL format. Expected: https://discord.com/api/webhooks/... or https://discordapp.com/api/webhooks/... or https://discordapi.com/api/webhooks/..." -ForegroundColor Yellow
             $webhookUrl = $null
         }
     } else {
@@ -191,98 +195,6 @@ function Write-ProgressStep {
     Write-Progress -Activity $Activity -Status $Status -PercentComplete $PercentComplete
 }
 
-function Get-KernelDMAProtectionStatus {
-    # Returns: $true if enabled, $false if disabled, $null if unsupported
-    # Cache registry path check
-    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\KernelDmaProtection"
-    
-    if (-not $Global:RegistryPathCache.ContainsKey($regPath)) {
-        $Global:RegistryPathCache[$regPath] = Test-Path $regPath
-    }
-    
-    # Method 1: Check registry directly (most reliable method)
-    try {
-        if ($Global:RegistryPathCache[$regPath]) {
-            $regValue = Get-ItemProperty -Path $regPath -Name "Enabled" -ErrorAction SilentlyContinue
-            if ($regValue) {
-                if ($regValue.Enabled -eq 1) {
-                    return $true
-                } elseif ($regValue.Enabled -eq 0) {
-                    return $false
-                }
-            }
-        } else {
-            # Registry path doesn't exist - feature is likely unsupported
-            return $null
-        }
-    } catch {
-        Write-Warning "Error checking Kernel DMA Protection registry: $($_.Exception.Message). Try running as Administrator."
-    }
-    
-    # Method 2: Check via WMI/CIM (DeviceGuard namespace) - Windows 10 1803+
-    try {
-        $dmaStatus = Get-CimInstanceCompat -Namespace "root\Microsoft\Windows\DeviceGuard" -ClassName "Win32_DeviceGuard"
-        if ($dmaStatus) {
-            $kdpStatus = $dmaStatus | Select-Object -ExpandProperty KernelDmaProtectionStatus -ErrorAction SilentlyContinue
-            # Status values: 0=Off, 1=On, 2=On with UEFI lock
-            if ($kdpStatus -eq 1 -or $kdpStatus -eq 2) {
-                return $true
-            } elseif ($kdpStatus -eq 0) {
-                return $false
-            }
-        }
-    } catch {
-        # DeviceGuard namespace may not exist on older Windows versions - this is expected
-    }
-    
-    # Method 3: Check System Information via msinfo32
-    $tempFile = "$env:TEMP\msinfo_report_$(Get-Random).txt"
-    try {
-        $proc = Start-Process -FilePath "msinfo32.exe" -ArgumentList "/report", "`"$tempFile`"", "/nfo", "`"$tempFile`"" -Wait -NoNewWindow -PassThru -ErrorAction SilentlyContinue
-        
-        # Wait for file to be created (up to 5 seconds)
-        $maxWait = 10
-        $waited = 0
-        while (-not (Test-Path $tempFile) -and $waited -lt $maxWait) {
-            Start-Sleep -Milliseconds 500
-            $waited++
-        }
-        
-        if (Test-Path $tempFile) {
-            Start-Sleep -Milliseconds 1000
-            $content = Get-Content $tempFile -ErrorAction SilentlyContinue
-            Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
-            
-            foreach ($line in $content) {
-                if ($line -match "Kernel DMA Protection\s*:\s*(\S+)") {
-                    $result = $matches[1].Trim()
-                    if ($result -eq "Enabled" -or $result -eq "On") {
-                        return $true
-                    }
-                    if ($result -eq "Disabled" -or $result -eq "Off") {
-                        return $false
-                    }
-                    if ($result -match "Not Available|Not Supported|Unsupported") {
-                        return $null
-                    }
-                }
-            }
-        }
-    } catch {
-        Write-Warning "Error checking msinfo32: $($_.Exception.Message)"
-        if (Test-Path $tempFile) {
-            Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
-        }
-    }
-    
-    # If registry path doesn't exist, feature is unsupported
-    if (-not $Global:RegistryPathCache[$regPath]) {
-        return $null
-    }
-    
-    # Default: assume disabled (not unsupported, since registry path exists)
-    return $false
-}
 
 function Get-SecureBootStatus {
     # Compatible with Windows 8+ and UEFI systems
@@ -446,6 +358,307 @@ function Get-DefenderRealTimeStatus {
     return $null
 }
 
+
+function Get-VBSStatus {
+    # Checks Virtualization-based Security (VBS) status
+    # Returns: $true if enabled, $false if disabled, $null if unsupported
+    try {
+        # Method 1: Check registry
+        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard"
+        if (Test-Path $regPath) {
+            $vbsValue = Get-ItemProperty -Path $regPath -Name "EnableVirtualizationBasedSecurity" -ErrorAction SilentlyContinue
+            if ($null -ne $vbsValue -and $null -ne $vbsValue.EnableVirtualizationBasedSecurity) {
+                if ($vbsValue.EnableVirtualizationBasedSecurity -eq 1) {
+                    return $true
+                } elseif ($vbsValue.EnableVirtualizationBasedSecurity -eq 0) {
+                    return $false
+                }
+            }
+        }
+        
+        # Method 2: Check via WMI/CIM (DeviceGuard namespace)
+        try {
+            $deviceGuard = Get-CimInstanceCompat -Namespace "root\Microsoft\Windows\DeviceGuard" -ClassName "Win32_DeviceGuard"
+            if ($deviceGuard) {
+                $vbsStatus = $deviceGuard | Select-Object -ExpandProperty VirtualizationBasedSecurityStatus -ErrorAction SilentlyContinue
+                # Status values: 0=Off, 1=On, 2=On with UEFI lock
+                if ($vbsStatus -eq 1 -or $vbsStatus -eq 2) {
+                    return $true
+                } elseif ($vbsStatus -eq 0) {
+                    return $false
+                }
+            }
+        } catch {
+            # DeviceGuard namespace may not exist - expected on older systems
+        }
+        
+        # Method 3: Check System Information
+        $tempFile = $null
+        try {
+            if (-not (Get-Command "msinfo32.exe" -ErrorAction SilentlyContinue)) {
+                return $null
+            }
+            
+            $tempFile = "$env:TEMP\msinfo_vbs_$(Get-Random).txt"
+            $null = Start-Process -FilePath "msinfo32.exe" -ArgumentList "/report", "`"$tempFile`"" -Wait -NoNewWindow -PassThru -ErrorAction SilentlyContinue
+            
+            $maxWait = 15
+            $waited = 0
+            while (-not (Test-Path $tempFile) -and $waited -lt $maxWait) {
+                Start-Sleep -Milliseconds 500
+                $waited++
+            }
+            
+            if (Test-Path $tempFile) {
+                Start-Sleep -Milliseconds 1500
+                $content = Get-Content $tempFile -ErrorAction SilentlyContinue
+                if ($content) {
+                    foreach ($line in $content) {
+                        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                        if ($line -match "Virtualization-based security\s*:\s*(\S+)") {
+                            $result = $matches[1].Trim()
+                            if ($result -eq "Enabled" -or $result -eq "Running") {
+                                Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+                                return $true
+                            }
+                            if ($result -eq "Disabled" -or $result -eq "Not running") {
+                                Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+                                return $false
+                            }
+                        }
+                    }
+                }
+                Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+            }
+        } catch {
+            if ($tempFile -and (Test-Path $tempFile)) {
+                Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+        
+    } catch {
+        Write-Warning "Error checking VBS status: $($_.Exception.Message). Try running as Administrator."
+    }
+    
+    return $null
+}
+
+function Get-TPMStatus {
+    # Checks TPM (Trusted Platform Module) presence and status
+    # Returns: @{Present=$true/$false; Version="2.0"/"1.2"/$null; Enabled=$true/$false/$null}
+    $result = @{
+        Present = $false
+        Version = $null
+        Enabled = $false
+    }
+    
+    try {
+        # Method 1: Check via TPM WMI provider
+        $tpm = Get-CimInstanceCompat -Namespace "root\cimv2\security\microsofttpm" -ClassName "Win32_Tpm"
+        if ($tpm) {
+            $result.Present = $true
+            $result.Enabled = $tpm.IsEnabled_InitialValue
+            $result.Version = $tpm.SpecVersion
+            return $result
+        }
+        
+        # Method 2: Check via TPM PowerShell cmdlets (Windows 10+)
+        if (Get-Command Get-Tpm -ErrorAction SilentlyContinue) {
+            $tpmInfo = Get-Tpm -ErrorAction SilentlyContinue
+            if ($tpmInfo) {
+                $result.Present = $tpmInfo.TpmPresent
+                $result.Enabled = $tpmInfo.TpmEnabled
+                $result.Version = if ($tpmInfo.TpmVersion) { $tpmInfo.TpmVersion } else { $null }
+                return $result
+            }
+        }
+        
+        # Method 3: Check registry
+        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\TPM"
+        if (Test-Path $regPath) {
+            $result.Present = $true
+            # Can't determine version/enabled status from registry alone
+        }
+        
+        # Method 4: Check System Information
+        $tempFile = $null
+        try {
+            if (-not (Get-Command "msinfo32.exe" -ErrorAction SilentlyContinue)) {
+                return $result
+            }
+            
+            $tempFile = "$env:TEMP\msinfo_tpm_$(Get-Random).txt"
+            $null = Start-Process -FilePath "msinfo32.exe" -ArgumentList "/report", "`"$tempFile`"" -Wait -NoNewWindow -PassThru -ErrorAction SilentlyContinue
+            
+            $maxWait = 15
+            $waited = 0
+            while (-not (Test-Path $tempFile) -and $waited -lt $maxWait) {
+                Start-Sleep -Milliseconds 500
+                $waited++
+            }
+            
+            if (Test-Path $tempFile) {
+                Start-Sleep -Milliseconds 1500
+                $content = Get-Content $tempFile -ErrorAction SilentlyContinue
+                if ($content) {
+                    foreach ($line in $content) {
+                        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                        if ($line -match "TPM\s+Version\s*:\s*(\S+)") {
+                            $result.Present = $true
+                            $result.Version = $matches[1].Trim()
+                        }
+                        if ($line -match "TPM\s+Manufacturer\s*:\s*(\S+)") {
+                            $result.Present = $true
+                        }
+                    }
+                }
+                Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+            }
+        } catch {
+            if ($tempFile -and (Test-Path $tempFile)) {
+                Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+        
+    } catch {
+        Write-Warning "Error checking TPM status: $($_.Exception.Message)"
+    }
+    
+    return $result
+}
+
+
+function Get-PreBootDMAProtection {
+    # Attempts to check Pre-boot DMA Protection status
+    # This is difficult to check from OS level, but we can infer from other settings
+    # Returns: $true if likely enabled, $false if likely disabled, $null if unknown
+    try {
+        # Pre-boot DMA protection is typically tied to:
+        # 1. Secure Boot being enabled
+        # 2. Kernel DMA Protection being enabled
+        # 3. UEFI firmware settings (not directly accessible from OS)
+        # 4. TPM 2.0 presence
+        # 5. IOMMU being enabled
+        
+        $secureBoot = Get-SecureBootStatus
+        $tpmStatus = Get-TPMStatus
+        
+        # Method 1: Strong indicators - if Secure Boot and TPM are enabled, pre-boot protection is likely enabled
+        if ($secureBoot -and $tpmStatus.Present -and $tpmStatus.Enabled) {
+            # Critical components enabled - pre-boot protection is likely enabled
+            return $true
+        }
+        
+        # Method 2: Check registry for pre-boot DMA protection settings
+        try {
+            $preBootPaths = @(
+                "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\KernelDmaProtection",
+                "HKLM:\SYSTEM\CurrentControlSet\Control\Firmware"
+            )
+            
+            foreach ($path in $preBootPaths) {
+                if (Test-Path $path) {
+                    $preBootValue = Get-ItemProperty -Path $path -Name "PreBootDmaProtection" -ErrorAction SilentlyContinue
+                    if ($null -ne $preBootValue -and $null -ne $preBootValue.PreBootDmaProtection) {
+                        if ($preBootValue.PreBootDmaProtection -eq 1) {
+                            return $true
+                        }
+                        if ($preBootValue.PreBootDmaProtection -eq 0) {
+                            return $false
+                        }
+                    }
+                    
+                    # Check for related settings
+                    $allProps = Get-ItemProperty -Path $path -ErrorAction SilentlyContinue
+                    if ($allProps) {
+                        $preBootProps = $allProps.PSObject.Properties | Where-Object { 
+                            $_.Name -match "Pre.*Boot|PreBoot|Boot.*DMA|DMA.*Boot" 
+                        }
+                        if ($preBootProps) {
+                            foreach ($prop in $preBootProps) {
+                                $val = $prop.Value
+                                if ($val -eq 1 -or $val -match "Enabled|On|True") {
+                                    return $true
+                                }
+                                if ($val -eq 0 -or $val -match "Disabled|Off|False") {
+                                    return $false
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch {
+            # Registry check failed - continue to other methods
+        }
+        
+        # Method 3: Check System Information for pre-boot DMA protection
+        $tempFile = $null
+        try {
+            if (Get-Command "msinfo32.exe" -ErrorAction SilentlyContinue) {
+                $tempFile = "$env:TEMP\msinfo_preboot_$(Get-Random).txt"
+                $null = Start-Process -FilePath "msinfo32.exe" -ArgumentList "/report", "`"$tempFile`"" -Wait -NoNewWindow -PassThru -ErrorAction SilentlyContinue
+                
+                $maxWait = 15
+                $waited = 0
+                while (-not (Test-Path $tempFile) -and $waited -lt $maxWait) {
+                    Start-Sleep -Milliseconds 500
+                    $waited++
+                }
+                
+                if (Test-Path $tempFile) {
+                    Start-Sleep -Milliseconds 2000
+                    $content = Get-Content $tempFile -ErrorAction SilentlyContinue
+                    if ($content) {
+                        foreach ($line in $content) {
+                            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                            if ($line -match "Pre.*Boot.*DMA|PreBoot.*DMA|Boot.*DMA.*Protection" -and 
+                                $line -match "(Enabled|On|Yes|Active)") {
+                                Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+                                return $true
+                            }
+                            if ($line -match "Pre.*Boot.*DMA|PreBoot.*DMA|Boot.*DMA.*Protection" -and 
+                                $line -match "(Disabled|Off|No|Inactive)") {
+                                Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+                                return $false
+                            }
+                        }
+                    }
+                    Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+                }
+            }
+        } catch {
+            if ($tempFile -and (Test-Path $tempFile)) {
+                Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+        
+        # Method 4: Inference based on component status
+        # If Secure Boot is disabled, Pre-boot DMA Protection is very likely disabled
+        if (-not $secureBoot) {
+            return $false
+        }
+        
+        # If Secure Boot is enabled, check TPM status
+        if ($secureBoot) {
+            # Secure Boot enabled - check if TPM is present (often required)
+            if ($tpmStatus.Present -and $tpmStatus.Enabled) {
+                return $true
+            }
+            # Secure Boot enabled but TPM not present/disabled - might still work but less certain
+            return $null
+        }
+        
+        # Otherwise, we can't determine with certainty
+        return $null
+        
+    } catch {
+        # Error occurred - return null
+    }
+    
+    return $null
+}
+
 function Test-DeviceForSuspicion {
     param(
         [AllowEmptyString()]
@@ -513,30 +726,46 @@ function Test-DeviceForSuspicion {
 function Get-SuspiciousPresentPCIDevices {
     Write-ProgressStep -Activity "Scanning Devices" -Status "Checking present PCI devices..." -PercentComplete 10
     Write-Host "   [Scanning] Checking present PCI devices..." -ForegroundColor Gray
-    $deviceList = Get-CimInstanceCompat -ClassName "Win32_PnPEntity"
     $foundDevices = @()
-    $totalDevices = $deviceList.Count
-    $processed = 0
     
-    foreach ($device in $deviceList) {
-        $processed++
-        if ($processed % 50 -eq 0) {
-            Write-ProgressStep -Activity "Scanning Devices" -Status "Processing device $processed of $totalDevices..." -PercentComplete (10 + ($processed / $totalDevices * 20))
-            Write-Host "   [Progress] Processing device $processed of $totalDevices..." -ForegroundColor Gray
+    try {
+        $deviceList = Get-CimInstanceCompat -ClassName "Win32_PnPEntity"
+        if ($null -eq $deviceList) {
+            return $foundDevices
         }
         
-        $evidenceLevel = Test-DeviceForSuspicion -Name $device.Name -Description $device.Description -HardwareIDs $device.HardwareID
-        if ($evidenceLevel -ne "NONE") {
-            $foundDevices += [PSCustomObject]@{
-                Device = $device
-                Evidence = $evidenceLevel
-                DeviceName = $device.Name
-                DeviceDescription = $device.Description
-                HardwareIDs = $device.HardwareID
-                Status = $device.Status
-                ClassGuid = $device.ClassGuid
+        # Handle both single object and array
+        if ($deviceList -is [array]) {
+            $totalDevices = $deviceList.Count
+        } else {
+            $deviceList = @($deviceList)
+            $totalDevices = 1
+        }
+        
+        $processed = 0
+        foreach ($device in $deviceList) {
+            $processed++
+            if ($totalDevices -gt 0 -and $processed % 50 -eq 0) {
+                $percentComplete = 10 + [Math]::Min(20, ($processed / $totalDevices * 20))
+                Write-ProgressStep -Activity "Scanning Devices" -Status "Processing device $processed of $totalDevices..." -PercentComplete $percentComplete
+                Write-Host "   [Progress] Processing device $processed of $totalDevices..." -ForegroundColor Gray
+            }
+            
+            $evidenceLevel = Test-DeviceForSuspicion -Name $device.Name -Description $device.Description -HardwareIDs $device.HardwareID
+            if ($evidenceLevel -ne "NONE") {
+                $foundDevices += [PSCustomObject]@{
+                    Device = $device
+                    Evidence = $evidenceLevel
+                    DeviceName = $device.Name
+                    DeviceDescription = $device.Description
+                    HardwareIDs = $device.HardwareID
+                    Status = $device.Status
+                    ClassGuid = $device.ClassGuid
+                }
             }
         }
+    } catch {
+        Write-Warning "Error scanning present PCI devices: $($_.Exception.Message)"
     }
     return $foundDevices
 }
@@ -551,40 +780,50 @@ function Get-SuspiciousHiddenDevices {
         return @()
     }
     
-    $allDevices = Get-PnpDevice -PresentOnly:$false -ErrorAction SilentlyContinue
-    $hiddenResults = @()
-    $totalDevices = ($allDevices | Where-Object { $_.Status -eq "Unknown" -or $_.Status -eq "Error" }).Count
-    $processed = 0
-    
-    foreach ($device in $allDevices) {
-        if ($device.Status -eq "Unknown" -or $device.Status -eq "Error") {
-            $processed++
-            if ($processed % 10 -eq 0 -and $totalDevices -gt 0) {
-                Write-ProgressStep -Activity "Scanning Devices" -Status "Processing hidden device $processed of $totalDevices..." -PercentComplete (35 + ($processed / $totalDevices * 15))
-                Write-Host "   [Progress] Processing hidden device $processed of $totalDevices..." -ForegroundColor Gray
-            }
-            
-            try {
-                $cimDevice = Get-CimInstanceCompat -ClassName "Win32_PnPEntity" -Filter "DeviceID='$($device.InstanceId.Replace('\', '\\'))'"
-                if ($cimDevice) {
-                    $evidenceLevel = Test-DeviceForSuspicion -Name $cimDevice.Name -Description $cimDevice.Description -HardwareIDs $cimDevice.HardwareID
-                    if ($evidenceLevel -ne "NONE") {
-                        $hiddenResults += [PSCustomObject]@{
-                            PnpDevice = $device
-                            CimDevice = $cimDevice
-                            Evidence = $evidenceLevel
-                            DeviceName = $cimDevice.Name
-                            DeviceDescription = $cimDevice.Description
-                            HardwareIDs = $cimDevice.HardwareID
-                            Status = $device.Status
-                            InstanceId = $device.InstanceId
+    try {
+        $allDevices = Get-PnpDevice -PresentOnly:$false -ErrorAction SilentlyContinue
+        if ($null -eq $allDevices) {
+            return @()
+        }
+        
+        $hiddenResults = @()
+        $totalDevices = ($allDevices | Where-Object { $_.Status -eq "Unknown" -or $_.Status -eq "Error" }).Count
+        $processed = 0
+        
+        foreach ($device in $allDevices) {
+            if ($device.Status -eq "Unknown" -or $device.Status -eq "Error") {
+                $processed++
+                if ($totalDevices -gt 0 -and $processed % 10 -eq 0) {
+                    $percentComplete = 35 + [Math]::Min(15, ($processed / $totalDevices * 15))
+                    Write-ProgressStep -Activity "Scanning Devices" -Status "Processing hidden device $processed of $totalDevices..." -PercentComplete $percentComplete
+                    Write-Host "   [Progress] Processing hidden device $processed of $totalDevices..." -ForegroundColor Gray
+                }
+                
+                try {
+                    $cimDevice = Get-CimInstanceCompat -ClassName "Win32_PnPEntity" -Filter "DeviceID='$($device.InstanceId.Replace('\', '\\'))'"
+                    if ($cimDevice) {
+                        $evidenceLevel = Test-DeviceForSuspicion -Name $cimDevice.Name -Description $cimDevice.Description -HardwareIDs $cimDevice.HardwareID
+                        if ($evidenceLevel -ne "NONE") {
+                            $hiddenResults += [PSCustomObject]@{
+                                PnpDevice = $device
+                                CimDevice = $cimDevice
+                                Evidence = $evidenceLevel
+                                DeviceName = $cimDevice.Name
+                                DeviceDescription = $cimDevice.Description
+                                HardwareIDs = $cimDevice.HardwareID
+                                Status = $device.Status
+                                InstanceId = $device.InstanceId
+                            }
                         }
                     }
+                } catch {
+                    # Skip devices that can't be queried
                 }
-            } catch {
-                # Skip devices that can't be queried
             }
         }
+    } catch {
+        Write-Warning "Error scanning hidden devices: $($_.Exception.Message)"
+        return @()
     }
     return $hiddenResults
 }
@@ -596,25 +835,40 @@ function Get-SuspiciousRegistryPCIDevices {
     $registryResults = @()
     
     if (Test-Path $registryPath) {
-        $registryItems = Get-ChildItem $registryPath -ErrorAction SilentlyContinue
-        $totalItems = $registryItems.Count
-        $processed = 0
-        
-        foreach ($item in $registryItems) {
-            $processed++
-            if ($processed % 100 -eq 0) {
-                Write-ProgressStep -Activity "Scanning Devices" -Status "Processing registry entry $processed of $totalItems..." -PercentComplete (55 + ($processed / $totalItems * 10))
-                Write-Host "   [Progress] Processing registry entry $processed of $totalItems..." -ForegroundColor Gray
+        try {
+            $registryItems = Get-ChildItem $registryPath -ErrorAction SilentlyContinue
+            if ($null -eq $registryItems) {
+                return $registryResults
             }
             
-            if ($Global:VendorRegex.IsMatch($item.PSChildName)) {
-                $registryResults += [PSCustomObject]@{
-                    RegistryKey = $item.PSPath
-                    Identifier = $item.PSChildName
-                    Evidence = "SUSPICIOUS"
-                    LastWriteTime = $item.LastWriteTime
+            # Handle both single object and array
+            if ($registryItems -is [array]) {
+                $totalItems = $registryItems.Count
+            } else {
+                $registryItems = @($registryItems)
+                $totalItems = 1
+            }
+            
+            $processed = 0
+            foreach ($item in $registryItems) {
+                $processed++
+                if ($totalItems -gt 0 -and $processed % 100 -eq 0) {
+                    $percentComplete = 55 + [Math]::Min(10, ($processed / $totalItems * 10))
+                    Write-ProgressStep -Activity "Scanning Devices" -Status "Processing registry entry $processed of $totalItems..." -PercentComplete $percentComplete
+                    Write-Host "   [Progress] Processing registry entry $processed of $totalItems..." -ForegroundColor Gray
+                }
+                
+                if ($Global:VendorRegex.IsMatch($item.PSChildName)) {
+                    $registryResults += [PSCustomObject]@{
+                        RegistryKey = $item.PSPath
+                        Identifier = $item.PSChildName
+                        Evidence = "SUSPICIOUS"
+                        LastWriteTime = $item.LastWriteTime
+                    }
                 }
             }
+        } catch {
+            Write-Warning "Error scanning registry: $($_.Exception.Message)"
         }
     } else {
         Write-Warning "Registry path $registryPath not found. This may require Administrator privileges."
@@ -648,8 +902,8 @@ function Parse-SetupAPILog {
                 $chunk = $_
                 foreach ($line in $chunk) {
                     $lineNumber++
-                    if ($lineNumber % 5000 -eq 0) {
-                        $percent = 70 + ([math]::Min(90, ($lineNumber / $totalLines * 20)))
+                    if ($totalLines -gt 0 -and $lineNumber % 5000 -eq 0) {
+                        $percent = 70 + [Math]::Min(20, ($lineNumber / $totalLines * 20))
                         Write-ProgressStep -Activity "Analyzing Logs" -Status "Processing line $lineNumber of ~$totalLines..." -PercentComplete $percent
                         Write-Host "   [Progress] Processing line $lineNumber of ~$totalLines..." -ForegroundColor Gray
                     }
@@ -722,13 +976,13 @@ function Check-ThunderboltEvents {
         
         $events = Get-WinEvent -LogName "Microsoft-Windows-Thunderbolt/Operational" -ErrorAction SilentlyContinue -MaxEvents 1000
         if ($events) {
-            foreach ($event in $events) {
-                if ($event.Message -match "(unauthorized|failed|blocked)") {
+            foreach ($evt in $events) {
+                if ($evt.Message -match "(unauthorized|failed|blocked)") {
                     $thunderboltEvents += [PSCustomObject]@{
-                        Event = $event
-                        TimeCreated = $event.TimeCreated
-                        Id = $event.Id
-                        Message = $event.Message
+                        Event = $evt
+                        TimeCreated = $evt.TimeCreated
+                        Id = $evt.Id
+                        Message = $evt.Message
                     }
                 }
             }
@@ -791,10 +1045,12 @@ function Export-ResultsToJSON {
             ComputerName = $env:COMPUTERNAME
             OSVersion = (Get-CimInstanceCompat -ClassName "Win32_OperatingSystem").Version
             SecureBoot = $ScanResults.SecureBoot
-            KernelDMA = $ScanResults.KernelDMA
             CoreIsolation = $ScanResults.CoreIsolation
             TamperProtection = $ScanResults.TamperProtection
             DefenderRealTime = $ScanResults.DefenderRealTime
+            VBS = $ScanResults.VBS
+            TPM = $ScanResults.TPM
+            PreBootDMA = $ScanResults.PreBootDMA
         }
         Results = @{
             FinalColor = $ScanResults.FinalColor
@@ -858,10 +1114,12 @@ function Export-ResultsToHTML {
     <div class="section">
         <h2>Security Status</h2>
         <p>Secure Boot: $($ScanResults.SecureBoot)</p>
-        <p>Kernel DMA Protection: $($ScanResults.KernelDMA)</p>
         <p>Core Isolation (HVCI): $($ScanResults.CoreIsolation)</p>
         <p>Tamper Protection: $($ScanResults.TamperProtection)</p>
         <p>Defender Real-Time: $($ScanResults.DefenderRealTime)</p>
+        <p>VBS: $($ScanResults.VBS)</p>
+        <p>TPM: $($ScanResults.TPM)</p>
+        <p>Pre-boot DMA Protection: $($ScanResults.PreBootDMA)</p>
     </div>
     
     <div class="section">
@@ -902,10 +1160,12 @@ Suspicious Items: $($ScanResults.SuspiciousItems)
 
 SECURITY STATUS:
 Secure Boot: $($ScanResults.SecureBoot)
-Kernel DMA Protection: $($ScanResults.KernelDMA)
 Core Isolation (HVCI): $($ScanResults.CoreIsolation)
 Tamper Protection: $($ScanResults.TamperProtection)
 Defender Real-Time: $($ScanResults.DefenderRealTime)
+VBS: $($ScanResults.VBS)
+TPM: $($ScanResults.TPM)
+Pre-boot DMA Protection: $($ScanResults.PreBootDMA)
 
 DEVICE SCAN:
 Present PCI Devices: $($ScanResults.PresentDevices.Count)
@@ -927,26 +1187,49 @@ EDID Monitors: $($ScanResults.EDIDMonitors.Count)
 
 #region Main Execution
 
-Write-Host "`nStep 1: Security Checks..." -ForegroundColor Cyan
-$secureBootEnabled = Get-SecureBootStatus
-$kernelDmaStatus = Get-KernelDMAProtectionStatus
-$coreIsolationStatus = Get-CoreIsolationStatus
-$tamperProtectionStatus = Get-TamperProtectionStatus
-$defenderRealTimeStatus = Get-DefenderRealTimeStatus
+# Initialize variables to prevent errors
+$secureBootText = "UNKNOWN"
+$coreIsolationText = "UNKNOWN"
+$tamperProtectionText = "UNKNOWN"
+$defenderRealTimeText = "UNKNOWN"
+$diagTrackStatusText = "UNKNOWN"
+$sysMainStatusText = "UNKNOWN"
+$vbsText = "UNSUPPORTED"
+$tpmVersionText = "NOT PRESENT"
+$tpmEnabledText = "N/A"
+$preBootDMAText = "UNKNOWN"
+
+try {
+    Write-Host "\n================[ SYSTEM SECURITY CHECKS ]================" -ForegroundColor Magenta
+    $secureBootEnabled = Get-SecureBootStatus
+    $coreIsolationStatus = Get-CoreIsolationStatus
+    $tamperProtectionStatus = Get-TamperProtectionStatus
+    $defenderRealTimeStatus = Get-DefenderRealTimeStatus
+
+    # Additional service checks
+    try {
+        $diagTrackService = Get-Service -Name 'DiagTrack' -ErrorAction SilentlyContinue
+        if ($null -ne $diagTrackService) {
+            $diagTrackStatusText = if ($diagTrackService.Status -eq 'Running') { 'ENABLED' } else { 'DISABLED' }
+        } else {
+            $diagTrackStatusText = 'NOT INSTALLED'
+        }
+    } catch {
+        $diagTrackStatusText = 'UNKNOWN'
+    }
+    
+    try {
+        $sysMainService = Get-Service -Name 'SysMain' -ErrorAction SilentlyContinue
+        if ($null -ne $sysMainService) {
+            $sysMainStatusText = if ($sysMainService.Status -eq 'Running') { 'ENABLED' } else { 'DISABLED' }
+        } else {
+            $sysMainStatusText = 'NOT INSTALLED'
+        }
+    } catch {
+        $sysMainStatusText = 'UNKNOWN'
+    }
 
 $secureBootText = if ($secureBootEnabled) { "ENABLED" } else { "DISABLED" }
-
-# Handle Kernel DMA status (can be $true, $false, or $null)
-if ($kernelDmaStatus -eq $true) {
-    $kernelDmaText = "ENABLED"
-    $kernelDmaEnabled = $true
-} elseif ($kernelDmaStatus -eq $false) {
-    $kernelDmaText = "DISABLED"
-    $kernelDmaEnabled = $false
-} else {
-    $kernelDmaText = "UNSUPPORTED"
-    $kernelDmaEnabled = $false
-}
 
 # Handle Core Isolation status
 if ($coreIsolationStatus -eq $true) {
@@ -981,14 +1264,6 @@ if ($secureBootEnabled) {
     Write-Host " - Secure Boot: DISABLED" -ForegroundColor Yellow
 }
 
-if ($kernelDmaStatus -eq $true) {
-    Write-Host " - Kernel DMA Protection: ENABLED" -ForegroundColor Green
-} elseif ($kernelDmaStatus -eq $false) {
-    Write-Host " - Kernel DMA Protection: DISABLED" -ForegroundColor Yellow
-} else {
-    Write-Host " - Kernel DMA Protection: UNSUPPORTED (hardware/firmware limitation)" -ForegroundColor Yellow
-}
-
 if ($coreIsolationStatus -eq $true) {
     Write-Host " - Core Isolation / Memory Integrity (HVCI): ENABLED" -ForegroundColor Green
 } else {
@@ -1007,7 +1282,60 @@ if ($defenderRealTimeStatus -eq $true) {
     Write-Host " - Windows Defender Real-Time Protection: DISABLED" -ForegroundColor Yellow
 }
 
-Write-Host "`nStep 2: Device & Log Scans..." -ForegroundColor Cyan
+# Additional DMA-specific security checks
+Write-Host "\n================[ ADVANCED DMA & VIRTUALIZATION CHECKS ]================" -ForegroundColor Magenta
+
+# Check VBS status
+$vbsStatus = Get-VBSStatus
+if ($vbsStatus -eq $true) {
+    $vbsText = "ENABLED"
+    Write-Host " - Virtualization-based Security (VBS): ENABLED" -ForegroundColor Green
+} elseif ($vbsStatus -eq $false) {
+    $vbsText = "DISABLED"
+    Write-Host " - Virtualization-based Security (VBS): DISABLED" -ForegroundColor Yellow
+} else {
+    $vbsText = "UNSUPPORTED"
+    Write-Host " - Virtualization-based Security (VBS): UNSUPPORTED" -ForegroundColor Yellow
+}
+
+# Check TPM status
+$tpmStatus = Get-TPMStatus
+if ($tpmStatus.Present) {
+    $tpmVersionText = if ($tpmStatus.Version) { "TPM $($tpmStatus.Version)" } else { "TPM (version unknown)" }
+    $tpmEnabledText = if ($tpmStatus.Enabled) { "ENABLED" } else { "DISABLED" }
+    Write-Host " - TPM: PRESENT ($tpmVersionText, $tpmEnabledText)" -ForegroundColor $(if ($tpmStatus.Enabled -and $tpmStatus.Version -match "2\.0") { "Green" } else { "Yellow" })
+} else {
+    $tpmVersionText = "NOT PRESENT"
+    $tpmEnabledText = "N/A"
+    Write-Host " - TPM: NOT PRESENT" -ForegroundColor Yellow
+}
+
+# Check Pre-boot DMA Protection
+$preBootDMA = Get-PreBootDMAProtection
+if ($preBootDMA -eq $true) {
+    $preBootDMAText = "LIKELY ENABLED"
+    Write-Host " - Pre-boot DMA Protection: LIKELY ENABLED" -ForegroundColor Green
+} elseif ($preBootDMA -eq $false) {
+    $preBootDMAText = "LIKELY DISABLED"
+    Write-Host " - Pre-boot DMA Protection: LIKELY DISABLED" -ForegroundColor Yellow
+} else {
+    $preBootDMAText = "UNKNOWN"
+    Write-Host " - Pre-boot DMA Protection: UNKNOWN (requires BIOS check)" -ForegroundColor Yellow
+}
+
+Write-Host "\n================[ DEVICE ENUMERATION & EVENT LOGS ]================" -ForegroundColor Magenta
+
+# Initialize device arrays to prevent errors
+$presentDevices = @()
+$hiddenDevices = @()
+$registryDevices = @()
+$concretePresent = @()
+$suspiciousPresent = @()
+$concreteHidden = @()
+$suspiciousHidden = @()
+$setupLogInfo = [PSCustomObject]@{ SuspiciousCount = 0; ConcreteCount = 0; SuspiciousLines = @(); ConcreteLines = @() }
+$thunderboltResults = @()
+$edidMonitors = @()
 
 # Scan present PCI devices
 try {
@@ -1118,13 +1446,19 @@ try {
 # Check Thunderbolt events
 try {
     $thunderboltResults = Check-ThunderboltEvents
+    if ($null -eq $thunderboltResults) {
+        $thunderboltResults = @()
+    }
     Write-Host " - Thunderbolt events: $($thunderboltResults.Count) unauthorized/blocked."
     
     if ($thunderboltResults.Count -gt 0) {
         Write-Host "`n   Thunderbolt Event Details:" -ForegroundColor Cyan
-        foreach ($event in $thunderboltResults) {
-            Write-Host "     Event ID: $($event.Id) - $($event.TimeCreated)" -ForegroundColor Yellow
-            Write-Host "       $($event.Message.Substring(0, [Math]::Min(100, $event.Message.Length)))" -ForegroundColor Gray
+        foreach ($evt in $thunderboltResults) {
+            Write-Host "     Event ID: $($evt.Id) - $($evt.TimeCreated)" -ForegroundColor Yellow
+            if ($evt.Message) {
+                $msgLength = [Math]::Min(100, $evt.Message.Length)
+                Write-Host "       $($evt.Message.Substring(0, $msgLength))" -ForegroundColor Gray
+            }
         }
     }
 } catch {
@@ -1136,6 +1470,9 @@ try {
 # Get EDID monitor data
 try {
     $edidMonitors = Get-EDIDData
+    if ($null -eq $edidMonitors) {
+        $edidMonitors = @()
+    }
     Write-Host " - EDID monitors found: $($edidMonitors.Count)"
     
     if ($edidMonitors.Count -gt 0) {
@@ -1156,29 +1493,29 @@ Write-Progress -Activity "Scanning" -Completed
 # Calculate totals
 $totalSuspicious = 0
 $totalConcrete = 0
-$totalSuspicious += $suspiciousPresent.Count
-$totalConcrete += $concretePresent.Count
-$totalSuspicious += $suspiciousHidden.Count
-$totalConcrete += $concreteHidden.Count
-$totalSuspicious += $registryDevices.Count
-$totalSuspicious += $setupLogInfo.SuspiciousCount
-$totalConcrete += $setupLogInfo.ConcreteCount
-if ($thunderboltResults.Count -gt 0) { $totalSuspicious++ }
-if ($edidMonitors.Count -gt 1) { $totalSuspicious++ }
+if ($null -ne $suspiciousPresent) { $totalSuspicious += $suspiciousPresent.Count }
+if ($null -ne $concretePresent) { $totalConcrete += $concretePresent.Count }
+if ($null -ne $suspiciousHidden) { $totalSuspicious += $suspiciousHidden.Count }
+if ($null -ne $concreteHidden) { $totalConcrete += $concreteHidden.Count }
+if ($null -ne $registryDevices) { $totalSuspicious += $registryDevices.Count }
+if ($null -ne $setupLogInfo) {
+    $totalSuspicious += $setupLogInfo.SuspiciousCount
+    $totalConcrete += $setupLogInfo.ConcreteCount
+}
+if ($null -ne $thunderboltResults -and $thunderboltResults.Count -gt 0) { $totalSuspicious++ }
+if ($null -ne $edidMonitors -and $edidMonitors.Count -gt 1) { $totalSuspicious++ }
 
-Write-Host "`nStep 3: Determining Final Color..." -ForegroundColor Cyan
+Write-Host "\n================[ SCAN SUMMARY & FINAL RESULT ]================" -ForegroundColor Magenta
 $resultColor = "Green"
 if ($totalConcrete -gt 0) {
     $resultColor = "Red"
 } elseif ($totalSuspicious -gt 0) {
-    if ($kernelDmaEnabled) {
-        $resultColor = "Red"
-    } else {
-        $resultColor = "Yellow"
-    }
+    $resultColor = "Yellow"
 }
 
-Write-Host "`n===== FINAL REPORT =====" -ForegroundColor Cyan
+Write-Host "\n==================================================" -ForegroundColor Cyan
+Write-Host ("{0,-28} {1,-10}" -f 'Category', 'Status') -ForegroundColor Yellow
+Write-Host ("{0,-28} {1,-10}" -f '--------------------------', '----------') -ForegroundColor Yellow
 
 # Color-coded summary table
 Write-Host "`nSummary Table:" -ForegroundColor Cyan
@@ -1187,16 +1524,18 @@ $summaryTable = @(
     [PSCustomObject]@{ Category = "Definite Items"; Value = $totalConcrete; Status = if ($totalConcrete -gt 0) { "Red" } else { "Green" } }
     [PSCustomObject]@{ Category = "Suspicious Items"; Value = $totalSuspicious; Status = if ($totalSuspicious -gt 0) { "Yellow" } else { "Green" } }
     [PSCustomObject]@{ Category = "Secure Boot"; Value = $secureBootText; Status = if ($secureBootEnabled) { "Green" } else { "Yellow" } }
-    [PSCustomObject]@{ Category = "Kernel DMA"; Value = $kernelDmaText; Status = if ($kernelDmaStatus -eq $true) { "Green" } elseif ($kernelDmaStatus -eq $false) { "Yellow" } else { "Yellow" } }
     [PSCustomObject]@{ Category = "Core Isolation (HVCI)"; Value = $coreIsolationText; Status = if ($coreIsolationStatus -eq $true) { "Green" } elseif ($coreIsolationStatus -eq $false) { "Yellow" } else { "Yellow" } }
     [PSCustomObject]@{ Category = "Tamper Protection"; Value = $tamperProtectionText; Status = if ($tamperProtectionStatus -eq $true) { "Green" } elseif ($tamperProtectionStatus -eq $false) { "Yellow" } else { "Yellow" } }
     [PSCustomObject]@{ Category = "Defender Real-Time"; Value = $defenderRealTimeText; Status = if ($defenderRealTimeStatus -eq $true) { "Green" } elseif ($defenderRealTimeStatus -eq $false) { "Yellow" } else { "Yellow" } }
-    [PSCustomObject]@{ Category = "Present PCI"; Value = $presentDevices.Count; Status = if ($presentDevices.Count -gt 0) { "Yellow" } else { "Green" } }
-    [PSCustomObject]@{ Category = "Hidden PCI"; Value = $hiddenDevices.Count; Status = if ($hiddenDevices.Count -gt 0) { "Yellow" } else { "Green" } }
-    [PSCustomObject]@{ Category = "Registry PCI"; Value = $registryDevices.Count; Status = if ($registryDevices.Count -gt 0) { "Yellow" } else { "Green" } }
-    [PSCustomObject]@{ Category = "SetupAPI Lines"; Value = ($setupLogInfo.SuspiciousCount + $setupLogInfo.ConcreteCount); Status = if (($setupLogInfo.SuspiciousCount + $setupLogInfo.ConcreteCount) -gt 0) { "Yellow" } else { "Green" } }
-    [PSCustomObject]@{ Category = "Thunderbolt Events"; Value = $thunderboltResults.Count; Status = if ($thunderboltResults.Count -gt 0) { "Yellow" } else { "Green" } }
-    [PSCustomObject]@{ Category = "EDID Monitors"; Value = $edidMonitors.Count; Status = if ($edidMonitors.Count -gt 1) { "Yellow" } else { "Green" } }
+    [PSCustomObject]@{ Category = "VBS"; Value = $vbsText; Status = if ($vbsStatus -eq $true) { "Green" } elseif ($vbsStatus -eq $false) { "Yellow" } else { "Yellow" } }
+    [PSCustomObject]@{ Category = "TPM"; Value = if ($null -ne $tpmStatus -and $tpmStatus.Present) { "$tpmVersionText ($tpmEnabledText)" } else { "NOT PRESENT" }; Status = if ($null -ne $tpmStatus -and $tpmStatus.Present -and $tpmStatus.Enabled -and $tpmStatus.Version -match "2\.0") { "Green" } elseif ($null -ne $tpmStatus -and $tpmStatus.Present) { "Yellow" } else { "Yellow" } }
+    [PSCustomObject]@{ Category = "Pre-boot DMA"; Value = $preBootDMAText; Status = if ($preBootDMA -eq $true) { "Green" } elseif ($preBootDMA -eq $false) { "Yellow" } else { "Yellow" } }
+    [PSCustomObject]@{ Category = "Present PCI"; Value = if ($null -ne $presentDevices) { $presentDevices.Count } else { 0 }; Status = if ($null -ne $presentDevices -and $presentDevices.Count -gt 0) { "Yellow" } else { "Green" } }
+    [PSCustomObject]@{ Category = "Hidden PCI"; Value = if ($null -ne $hiddenDevices) { $hiddenDevices.Count } else { 0 }; Status = if ($null -ne $hiddenDevices -and $hiddenDevices.Count -gt 0) { "Yellow" } else { "Green" } }
+    [PSCustomObject]@{ Category = "Registry PCI"; Value = if ($null -ne $registryDevices) { $registryDevices.Count } else { 0 }; Status = if ($null -ne $registryDevices -and $registryDevices.Count -gt 0) { "Yellow" } else { "Green" } }
+    [PSCustomObject]@{ Category = "SetupAPI Lines"; Value = if ($null -ne $setupLogInfo) { ($setupLogInfo.SuspiciousCount + $setupLogInfo.ConcreteCount) } else { 0 }; Status = if ($null -ne $setupLogInfo -and (($setupLogInfo.SuspiciousCount + $setupLogInfo.ConcreteCount) -gt 0)) { "Yellow" } else { "Green" } }
+    [PSCustomObject]@{ Category = "Thunderbolt Events"; Value = if ($null -ne $thunderboltResults) { $thunderboltResults.Count } else { 0 }; Status = if ($null -ne $thunderboltResults -and $thunderboltResults.Count -gt 0) { "Yellow" } else { "Green" } }
+    [PSCustomObject]@{ Category = "EDID Monitors"; Value = if ($null -ne $edidMonitors) { $edidMonitors.Count } else { 0 }; Status = if ($null -ne $edidMonitors -and $edidMonitors.Count -gt 1) { "Yellow" } else { "Green" } }
 )
 
 foreach ($row in $summaryTable) {
@@ -1205,7 +1544,12 @@ foreach ($row in $summaryTable) {
         "Yellow" { "Yellow" }
         default { "Green" }
     }
-    Write-Host ("  {0,-20} {1}" -f $row.Category, $row.Value) -ForegroundColor $color
+    $icon = switch ($row.Status) {
+        "Red" { "✗" }
+        "Yellow" { "!" }
+        default { "✓" }
+    }
+    Write-Host (" {0,-2} {1,-25} {2}" -f $icon, $row.Category, $row.Value) -ForegroundColor $color
 }
 
 switch ($resultColor) {
@@ -1213,7 +1557,7 @@ switch ($resultColor) {
         if ($totalConcrete -gt 0) {
             Write-Host "`nRED: 100% EVIDENCE OF DMA CHEAT DETECTED!" -ForegroundColor Red
         } else {
-            Write-Host "`nRED: Suspicious devices found, Kernel DMA ON => Definite DMA." -ForegroundColor Red
+            Write-Host "`nRED: Suspicious devices found - Definite DMA threat detected." -ForegroundColor Red
         }
     }
     "Yellow" {
@@ -1231,17 +1575,21 @@ $reportSummary = "DMA Detection Summary:`n" +
     "Suspicious Items: $totalSuspicious`n" +
     "`nSecurity Status:`n" +
     "Secure Boot: $secureBootText`n" +
-    "Kernel DMA Protection: $kernelDmaText`n" +
     "Core Isolation (HVCI): $coreIsolationText`n" +
     "Tamper Protection: $tamperProtectionText`n" +
     "Defender Real-Time: $defenderRealTimeText`n" +
+    "VBS: $vbsText`n" +
+    "TPM: $(if ($null -ne $tpmStatus -and $tpmStatus.Present) { "$tpmVersionText ($tpmEnabledText)" } else { "NOT PRESENT" })`n" +
+    "Pre-boot DMA Protection: $preBootDMAText`n" +
+    "Connected User Experiences & Telemetry (DiagTrack): $diagTrackStatusText`n" +
+    "SysMain: $sysMainStatusText`n" +
     "`nScan Results:`n" +
-    "Present PCI suspicious: $($presentDevices.Count), " +
-    "Hidden PCI suspicious: $($hiddenDevices.Count), " +
-    "Registry suspicious: $($registryDevices.Count), " +
-    "SetupAPI suspicious lines: $($setupLogInfo.SuspiciousCount + $setupLogInfo.ConcreteCount), " +
-    "Thunderbolt: $($thunderboltResults.Count), " +
-    "EDID: $($edidMonitors.Count)."
+    "Present PCI suspicious: $(if ($null -ne $presentDevices) { $presentDevices.Count } else { 0 }), " +
+    "Hidden PCI suspicious: $(if ($null -ne $hiddenDevices) { $hiddenDevices.Count } else { 0 }), " +
+    "Registry suspicious: $(if ($null -ne $registryDevices) { $registryDevices.Count } else { 0 }), " +
+    "SetupAPI suspicious lines: $(if ($null -ne $setupLogInfo) { ($setupLogInfo.SuspiciousCount + $setupLogInfo.ConcreteCount) } else { 0 }), " +
+    "Thunderbolt: $(if ($null -ne $thunderboltResults) { $thunderboltResults.Count } else { 0 }), " +
+    "EDID: $(if ($null -ne $edidMonitors) { $edidMonitors.Count } else { 0 })."
 
 Write-Host "`n$reportSummary"
 
@@ -1253,16 +1601,21 @@ if ($ExportResults) {
         DefiniteItems = $totalConcrete
         SuspiciousItems = $totalSuspicious
         SecureBoot = $secureBootText
-        KernelDMA = $kernelDmaText
-        PresentDevices = $presentDevices
-        HiddenDevices = $hiddenDevices
-        RegistryDevices = $registryDevices
-        SetupAPISuspicious = $setupLogInfo.SuspiciousCount
-        SetupAPIConcrete = $setupLogInfo.ConcreteCount
-        SetupAPISuspiciousLines = $setupLogInfo.SuspiciousLines
-        SetupAPIConcreteLines = $setupLogInfo.ConcreteLines
-        ThunderboltEvents = $thunderboltResults
-        EDIDMonitors = $edidMonitors
+        CoreIsolation = $coreIsolationText
+        TamperProtection = $tamperProtectionText
+        DefenderRealTime = $defenderRealTimeText
+        VBS = $vbsText
+        TPM = if ($null -ne $tpmStatus -and $tpmStatus.Present) { "$tpmVersionText ($tpmEnabledText)" } else { "NOT PRESENT" }
+        PreBootDMA = $preBootDMAText
+        PresentDevices = if ($null -ne $presentDevices) { $presentDevices } else { @() }
+        HiddenDevices = if ($null -ne $hiddenDevices) { $hiddenDevices } else { @() }
+        RegistryDevices = if ($null -ne $registryDevices) { $registryDevices } else { @() }
+        SetupAPISuspicious = if ($null -ne $setupLogInfo) { $setupLogInfo.SuspiciousCount } else { 0 }
+        SetupAPIConcrete = if ($null -ne $setupLogInfo) { $setupLogInfo.ConcreteCount } else { 0 }
+        SetupAPISuspiciousLines = if ($null -ne $setupLogInfo) { $setupLogInfo.SuspiciousLines } else { @() }
+        SetupAPIConcreteLines = if ($null -ne $setupLogInfo) { $setupLogInfo.ConcreteLines } else { @() }
+        ThunderboltEvents = if ($null -ne $thunderboltResults) { $thunderboltResults } else { @() }
+        EDIDMonitors = if ($null -ne $edidMonitors) { $edidMonitors } else { @() }
     }
     
     Export-ResultsToJSON -ScanResults $scanResults -FilePath $ExportPath
@@ -1295,6 +1648,19 @@ try {
     $null = Read-Host
 } catch {
     Start-Sleep -Seconds 3
+}
+
+} catch {
+    Write-Host "`nFATAL ERROR: An unexpected error occurred during execution." -ForegroundColor Red
+    Write-Host "Error Details: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Stack Trace: $($_.ScriptStackTrace)" -ForegroundColor Yellow
+    Write-Host "`nPlease report this error with the details above." -ForegroundColor Yellow
+    Write-Host "`nPress Enter to exit..."
+    try {
+        $null = Read-Host
+    } catch {
+        Start-Sleep -Seconds 3
+    }
 }
 
 #endregion
